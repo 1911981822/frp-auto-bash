@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
-# frp-easy-tunnel —— frp 一键部署外壳
+# frp-auto-bash —— frp 一键部署外壳
 #
 #   sudo ./install.sh server              # 在云服务器上安装 frps
 #   sudo ./install.sh client              # 在内网小主机上安装 frpc
 #   sudo ./install.sh uninstall           # 卸载
 #
 # 远程执行：
-#   curl -fsSL https://raw.githubusercontent.com/<账号>/frp-easy-tunnel/main/install.sh | sudo bash -s -- server
+#   curl -fsSL https://raw.githubusercontent.com/1911981822/frp-auto-bash/main/install.sh | sudo bash -s -- server
 #
 # 测试模式（不写入系统目录、不操作系统服务）：
 #   FRP_ROOT=/tmp/frp-test ./install.sh server
 set -euo pipefail
 
 # 仓库地址：发布前请改成你自己的 GitHub 仓库（影响远程执行与 update 子命令）
-: "${FRP_EASY_REPO:=your-name/frp-easy-tunnel}"
+: "${FRP_EASY_REPO:=1911981822/frp-auto-bash}"
 : "${FRP_EASY_BRANCH:=main}"
 
 # ---------- 定位仓库目录（本地运行 or 远程下载）----------
@@ -26,7 +26,7 @@ else
   # 通过 curl | bash 运行：下载完整仓库到临时目录
   command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 \
     || { echo "需要 curl 或 wget"; exit 1; }
-  REPO_DIR="$(mktemp -d)/frp-easy-tunnel"
+  REPO_DIR="$(mktemp -d)/frp-auto-bash"
   mkdir -p "$REPO_DIR"
   echo "[info] 远程模式：下载仓库 $FRP_EASY_REPO ..."
   if command -v curl >/dev/null 2>&1; then
@@ -54,7 +54,7 @@ TPL_DIR="$REPO_DIR/templates"
 # ---------- 帮助 ----------
 usage() {
   cat <<EOF
-${C_BOLD}frp-easy-tunnel${C_RESET} v${FRP_EASY_VERSION} —— frp 一键部署外壳
+${C_BOLD}frp-auto-bash${C_RESET} v${FRP_EASY_VERSION} —— frp 一键部署外壳
 
 用法:
   install.sh server  [选项]     安装服务端 frps（云服务器）
@@ -122,7 +122,7 @@ parse_args() {
 }
 
 do_uninstall() {
-  log_step "卸载 frp-easy-tunnel"
+  log_step "卸载 frp-auto-bash"
   local u
   for u in frps frpc; do
     if [ -f "$FRP_UNIT_DIR/$u.service" ]; then

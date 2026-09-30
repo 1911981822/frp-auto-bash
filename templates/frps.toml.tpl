@@ -1,4 +1,4 @@
-# frps 配置 —— 由 frp-easy-tunnel 自动生成（{{GENERATED_AT}}）
+# frps 配置 —— 由 frp-auto-bash 自动生成（{{GENERATED_AT}}）
 # 修改后请执行：systemctl restart frps
 
 bindPort = {{BIND_PORT}}

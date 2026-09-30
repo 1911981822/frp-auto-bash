@@ -13,7 +13,7 @@
 set -euo pipefail
 
 : "${FRP_ROOT:=}"
-: "${FRP_EASY_REPO:=your-name/frp-easy-tunnel}"
+: "${FRP_EASY_REPO:=1911981822/frp-auto-bash}"
 
 if [ -n "$FRP_ROOT" ]; then
   FRP_CONF_DIR="$FRP_ROOT/etc/frp"

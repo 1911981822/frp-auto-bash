@@ -1,4 +1,4 @@
-# frp-easy-tunnel
+# frp-auto-bash
 
 frp 的一键部署外壳：一条命令装好 frps / frpc，之后**所有隧道都在浏览器里增删改，即时生效，不重启进程**。
 
@@ -9,13 +9,13 @@ frp 的一键部署外壳：一条命令装好 frps / frpc，之后**所有隧�
 **云服务器（装服务端）**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/<你的账号>/frp-easy-tunnel/main/install.sh | sudo bash -s -- server
+curl -fsSL https://raw.githubusercontent.com/1911981822/frp-auto-bash/main/install.sh | sudo bash -s -- server
 ```
 
 **内网小主机（装客户端）**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/<你的账号>/frp-easy-tunnel/main/install.sh | sudo bash -s -- client \
+curl -fsSL https://raw.githubusercontent.com/1911981822/frp-auto-bash/main/install.sh | sudo bash -s -- client \
     --server-addr <公网IP> --server-port 7000 --token <上面的token> --ssh-remote-port 20001
 ```
 
@@ -130,7 +130,7 @@ FRP_ROOT=/tmp/frp-test ./install.sh client -y --no-service \
 `install.sh` 与 `bin/frp-easy` 中的仓库地址占位符：
 
 ```bash
-: "${FRP_EASY_REPO:=your-name/frp-easy-tunnel}"
+: "${FRP_EASY_REPO:=1911981822/frp-auto-bash}"
 ```
 
 改成你自己的 `owner/repo`，否则远程执行与 `update` 无法工作。

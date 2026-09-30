@@ -1,5 +1,5 @@
 [Unit]
-Description=frp server (frp-easy-tunnel)
+Description=frp server (frp-auto-bash)
 Documentation=https://github.com/fatedier/frp
 After=network-online.target
 Wants=network-online.target

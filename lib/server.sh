@@ -110,7 +110,7 @@ print_server_summary() {
   log_hint "${C_BOLD}防火墙需放行${C_RESET}：${SERVER_BIND_PORT}（控制连接）、${SERVER_PORT_START}-${SERVER_PORT_END}（业务端口）、${SERVER_SSH_GATEWAY_PORT}（应急）"
   log_hint ""
   log_hint "${C_BOLD}在内网小主机上执行${C_RESET}："
-  log_hint "  curl -fsSL https://raw.githubusercontent.com/<你的账号>/frp-easy-tunnel/main/install.sh | sudo bash -s -- client \\"
+  log_hint "  curl -fsSL https://raw.githubusercontent.com/1911981822/frp-auto-bash/main/install.sh | sudo bash -s -- client \\"
   log_hint "      --server-addr ${pub_ip} --server-port ${SERVER_BIND_PORT} --token ${SERVER_TOKEN}"
   log_hint ""
 }

@@ -1,4 +1,4 @@
-# frpc 配置 —— 由 frp-easy-tunnel 自动生成（{{GENERATED_AT}}）
+# frpc 配置 —— 由 frp-auto-bash 自动生成（{{GENERATED_AT}}）
 #
 # 设计约定：本文件只放「基础连接 + 管理端 + 自举通道」，极少改动。
 # 业务隧道请通过浏览器管理端或 `frp-easy add` 添加到 Store（{{STORE_PATH}}），
