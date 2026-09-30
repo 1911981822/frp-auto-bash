@@ -1,0 +1,432 @@
+#!/usr/bin/env bash
+# frp-easy —— frp 运维命令（安装后部署到 /usr/local/bin/frp-easy）
+#
+#   frp-easy status                 查看服务与隧道状态
+#   frp-easy list                   列出所有隧道
+#   frp-easy add <名称> [选项]       动态新增隧道（即时生效，不重启）
+#   frp-easy del <名称>              删除隧道
+#   frp-easy expose-admin           生成管理端访问通道并启动
+#   frp-easy backup / restore        备份 / 回滚配置
+#   frp-easy update [版本]           升级 frp 二进制
+#   frp-easy doctor                 健康自检
+#   frp-easy rescue                 配置写错导致失联时的救援回滚
+set -euo pipefail
+
+: "${FRP_ROOT:=}"
+: "${FRP_EASY_REPO:=your-name/frp-easy-tunnel}"
+
+if [ -n "$FRP_ROOT" ]; then
+  FRP_CONF_DIR="$FRP_ROOT/etc/frp"
+  FRP_LIB_DIR="$FRP_ROOT/var/lib/frp"
+  FRP_BIN_DIR="$FRP_ROOT/usr/local/bin"
+  FRP_UNIT_DIR="$FRP_ROOT/etc/systemd/system"
+else
+  FRP_CONF_DIR="/etc/frp"
+  FRP_LIB_DIR="/var/lib/frp"
+  FRP_BIN_DIR="/usr/local/bin"
+  FRP_UNIT_DIR="/etc/systemd/system"
+fi
+FRP_STORE_FILE="$FRP_LIB_DIR/db.json"
+FRP_BACKUP_DIR="$FRP_LIB_DIR/backups"
+FRP_ENV_FILE="$FRP_CONF_DIR/.frp-easy.env"
+
+C_RESET=""; C_RED=""; C_GREEN=""; C_YELLOW=""; C_BOLD=""; C_DIM=""
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+  C_RESET=$'\033[0m'; C_RED=$'\033[31m'; C_GREEN=$'\033[32m'
+  C_YELLOW=$'\033[33m'; C_BOLD=$'\033[1m'; C_DIM=$'\033[2m'
+fi
+log_info() { printf '[info] %s\n' "$*"; }
+log_ok()   { printf '%s[ok]%s %s\n' "$C_GREEN" "$C_RESET" "$*"; }
+log_warn() { printf '%s[warn]%s %s\n' "$C_YELLOW" "$C_RESET" "$*" >&2; }
+log_err()  { printf '%s[error]%s %s\n' "$C_RED" "$C_RESET" "$*" >&2; }
+log_hint() { printf '%s\n' "$*"; }
+die()      { log_err "$*"; exit 1; }
+
+# ---------- 载入安装参数 ----------
+load_conf() {
+  [ -f "$FRP_ENV_FILE" ] || die "未找到 $FRP_ENV_FILE，请先运行 install.sh"
+  # shellcheck disable=SC1090
+  . "$FRP_ENV_FILE"
+  ADMIN_PORT="${CLIENT_ADMIN_PORT:-7400}"
+  ADMIN_USER="${CLIENT_ADMIN_USER:-admin}"
+  ADMIN_PASS="${CLIENT_ADMIN_PASS:-}"
+  [ "$FRP_ROLE" = "client" ] || die "frp-easy 的隧道管理命令只在客户端（frpc）上可用"
+  [ -n "$ADMIN_PASS" ] || die "未记录管理端密码，请检查 $FRP_ENV_FILE"
+}
+
+# ---------- 管理端 API ----------
+API_CODE=""; API_BODY=""
+api() {
+  local method="$1" path="$2" data="${3:-}"
+  command -v curl >/dev/null 2>&1 || die "需要 curl"
+  local tmp args=(-sS --noproxy '*' -u "${ADMIN_USER}:${ADMIN_PASS}" -X "$method" -w '\n%{http_code}')
+  [ -n "$data" ] && args+=(-H 'Content-Type: application/json' -d "$data")
+  tmp="$(mktemp)"
+  curl "${args[@]}" "http://127.0.0.1:${ADMIN_PORT}${path}" >"$tmp" 2>/dev/null || {
+    rm -f "$tmp"; API_CODE="000"; API_BODY="无法连接管理端 http://127.0.0.1:${ADMIN_PORT}"; return 1; }
+  API_CODE="$(tail -n1 "$tmp")"
+  API_BODY="$(sed '$d' "$tmp")"
+  rm -f "$tmp"
+  case "$API_CODE" in 200|201|204) return 0 ;; *) return 1 ;; esac
+}
+
+# 判断管理端是否可达
+admin_alive() {
+  api GET /api/status >/dev/null 2>&1
+}
+
+# ---------- 类型子块构造（Store API 要求带类型子块）----------
+# build_proxy_json <name> <type> <localIP> <localPort> <remotePort> [domain]
+build_proxy_json() {
+  local name="$1" type="$2" lip="$3" lp="$4" rp="$5" domain="${6:-}"
+  case "$type" in
+    tcp)
+      printf '{"name":"%s","type":"tcp","localIP":"%s","localPort":%s,"tcp":{"remotePort":%s}}' \
+        "$name" "$lip" "$lp" "$rp" ;;
+    udp)
+      printf '{"name":"%s","type":"udp","localIP":"%s","localPort":%s,"udp":{"remotePort":%s}}' \
+        "$name" "$lip" "$lp" "$rp" ;;
+    http)
+      [ -n "$domain" ] || die "http 类型需要 --domain"
+      printf '{"name":"%s","type":"http","localIP":"%s","localPort":%s,"http":{"customDomains":["%s"]}}' \
+        "$name" "$lip" "$lp" "$domain" ;;
+    https)
+      [ -n "$domain" ] || die "https 类型需要 --domain"
+      printf '{"name":"%s","type":"https","localIP":"%s","localPort":%s,"https":{"customDomains":["%s"]}}' \
+        "$name" "$lip" "$lp" "$domain" ;;
+    stcp)
+      printf '{"name":"%s","type":"stcp","localIP":"%s","localPort":%s,"stcp":{"secretKey":"%s"}}' \
+        "$name" "$lip" "$lp" "$domain" ;;
+    *) die "暂不支持的代理类型: $type（支持 tcp/udp/http/https/stcp）" ;;
+  esac
+}
+
+# 检查 remotePort 是否已被占用
+remote_port_used() {
+  local rp="$1"
+  api GET /api/status >/dev/null 2>&1 || return 1
+  printf '%s' "$API_BODY" | grep -o '"remote_addr":"[^"]*:[0-9]*"' \
+    | grep -o ':[0-9]*"' | tr -d ':"' | grep -qx "$rp"
+}
+
+# ---------- 格式化输出 ----------
+json_field() {
+  printf '%s' "$1" | sed -n "s/.*\"$2\":\"\([^\"]*\)\".*/\1/p"
+}
+
+format_status() {
+  local json="$1"
+  if command -v python3 >/dev/null 2>&1; then
+    printf '%s' "$json" | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+print("  %-18s %-6s %-8s %-22s %s" % ("NAME","TYPE","STATUS","REMOTE","LOCAL"))
+for kind in d:
+    for p in d[kind]:
+        print("  %-18s %-6s %-8s %-22s %s" % (
+            p.get("name","-"), p.get("type","-"), p.get("status","-"),
+            p.get("remote_addr","-") or "-", p.get("local_addr","-") or "-"))
+' 2>/dev/null && return 0
+  fi
+
+  # 降级：无 python3 时用纯 bash 提取
+  printf '  %-18s %-6s %-8s %-22s %s\n' NAME TYPE STATUS REMOTE LOCAL
+  printf '%s' "$json" | grep -o '{"name":"[^}]*}' | while IFS= read -r item; do
+    printf '  %-18s %-6s %-8s %-22s %s\n' \
+      "$(json_field "$item" name)" \
+      "$(json_field "$item" type)" \
+      "$(json_field "$item" status)" \
+      "$(json_field "$item" remote_addr)" \
+      "$(json_field "$item" local_addr)"
+  done
+}
+
+# ---------- 子命令 ----------
+cmd_status() {
+  load_conf
+  printf '%s服务状态%s\n' "$C_BOLD" "$C_RESET"
+  if command -v systemctl >/dev/null 2>&1 && [ -z "$FRP_ROOT" ]; then
+    systemctl is-active frpc.service >/dev/null 2>&1 \
+      && log_ok "frpc.service 运行中" || log_warn "frpc.service 未运行"
+  fi
+  printf '\n%s隧道状态%s\n' "$C_BOLD" "$C_RESET"
+  if api GET /api/status; then
+    format_status "$API_BODY"
+  else
+    log_err "读取失败（HTTP $API_CODE）: $API_BODY"
+    log_hint "提示：管理端仅监听 127.0.0.1，需在设备本地执行本命令"
+    return 1
+  fi
+}
+
+cmd_list() { cmd_status; }
+
+cmd_add() {
+  load_conf
+  local name="${1:-}"
+  [ -n "$name" ] || die "用法: frp-easy add <名称> [--type tcp] [--local-ip 127.0.0.1] [--local-port 80] [--remote-port 20010] [--domain a.example.com]"
+  shift
+
+  local type="tcp" lip="127.0.0.1" lp="" rp="" domain=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --type) type="$2"; shift 2 ;;
+      --local-ip) lip="$2"; shift 2 ;;
+      --local-port) lp="$2"; shift 2 ;;
+      --remote-port) rp="$2"; shift 2 ;;
+      --domain) domain="$2"; shift 2 ;;
+      *) die "未知选项: $1" ;;
+    esac
+  done
+
+  case "$type" in
+    tcp|udp) [ -n "$rp" ] || die "$type 类型需要 --remote-port" ;;
+    stcp)    [ -n "$domain" ] || die "stcp 类型需要 --domain 传入 secretKey" ;;
+  esac
+  [ -n "$lp" ] || die "需要 --local-port"
+
+  admin_alive || die "管理端不可达，请确认 frpc 正在运行"
+
+  if [ -n "$rp" ] && remote_port_used "$rp"; then
+    die "公网端口 $rp 已被其他隧道占用，请换一个"
+  fi
+
+  local json
+  json="$(build_proxy_json "$name" "$type" "$lip" "$lp" "${rp:-0}" "$domain")"
+  if api POST /api/store/proxies "$json"; then
+    log_ok "隧道 $name 已添加并即时生效（已持久化，重启自动恢复）"
+  else
+    log_err "添加失败（HTTP $API_CODE）: $API_BODY"
+    return 1
+  fi
+}
+
+cmd_del() {
+  load_conf
+  local name="${1:-}"
+  [ -n "$name" ] || die "用法: frp-easy del <名称>"
+  admin_alive || die "管理端不可达"
+  if api DELETE "/api/store/proxies/${name}"; then
+    log_ok "隧道 $name 已删除并即时生效"
+  else
+    log_err "删除失败（HTTP $API_CODE）: $API_BODY"
+    return 1
+  fi
+}
+
+cmd_expose_admin() {
+  load_conf
+  local bind_port="${1:-17400}"
+  local visitor_conf="$FRP_LIB_DIR/admin-visitor.toml"
+  mkdir -p "$FRP_LIB_DIR"
+  cat > "$visitor_conf" <<EOF
+# 由 frp-easy expose-admin 生成：把小主机上的管理端以 stcp 私有隧道带到本地
+serverAddr = "${CLIENT_SERVER_ADDR}"
+serverPort = ${CLIENT_SERVER_PORT}
+auth.method = "token"
+auth.token  = "${CLIENT_TOKEN}"
+
+[[visitors]]
+name = "admin-panel-visitor"
+type = "stcp"
+serverName = "admin-panel"
+secretKey  = "${CLIENT_ADMIN_SECRET}"
+bindAddr = "127.0.0.1"
+bindPort = ${bind_port}
+EOF
+  log_ok "已生成 $visitor_conf"
+  log_hint ""
+  log_hint "在本机执行：  frpc -c $visitor_conf"
+  log_hint "然后浏览器打开：http://127.0.0.1:${bind_port}  （${ADMIN_USER} / ${ADMIN_PASS}）"
+  log_hint ""
+  log_hint "提示：需要在你能访问到 frps 的机器上运行，不必是小主机本身"
+}
+
+cmd_backup() {
+  local ts dest
+  ts="$(date +%Y%m%d-%H%M%S)"
+  dest="${FRP_BACKUP_DIR}/${ts}"
+  mkdir -p "$dest"
+  [ -f "$FRP_CONF_DIR/frpc.toml" ] && cp -a "$FRP_CONF_DIR/frpc.toml" "$dest/"
+  [ -f "$FRP_CONF_DIR/frps.toml" ] && cp -a "$FRP_CONF_DIR/frps.toml" "$dest/"
+  [ -f "$FRP_STORE_FILE" ] && cp -a "$FRP_STORE_FILE" "$dest/"
+  [ -f "$FRP_ENV_FILE" ] && cp -a "$FRP_ENV_FILE" "$dest/"
+  log_ok "已备份到 $dest"
+  ls -1 "$dest"
+}
+
+cmd_restore() {
+  local target="${1:-}"
+  if [ -z "$target" ]; then
+    log_info "可用备份："
+    ls -1 "$FRP_BACKUP_DIR" 2>/dev/null || die "没有可用备份"
+    die "用法: frp-easy restore <备份目录名>"
+  fi
+  local src="$FRP_BACKUP_DIR/$target"
+  [ -d "$src" ] || die "备份不存在: $src"
+  [ -f "$src/frpc.toml" ] && cp -a "$src/frpc.toml" "$FRP_CONF_DIR/frpc.toml"
+  [ -f "$src/frps.toml" ] && cp -a "$src/frps.toml" "$FRP_CONF_DIR/frps.toml"
+  [ -f "$src/db.json" ] && cp -a "$src/db.json" "$FRP_STORE_FILE"
+  log_ok "已从 $src 恢复"
+  log_hint "执行 systemctl restart frpc（或 frps）使配置生效"
+}
+
+cmd_update() {
+  local version="${1:-}"
+  [ -f "$FRP_ENV_FILE" ] && . "$FRP_ENV_FILE"
+  command -v curl >/dev/null 2>&1 || die "需要 curl"
+  if [ -z "$version" ]; then
+    version="$(curl -fsSL --noproxy '*' https://api.github.com/repos/fatedier/frp/releases/latest \
+      | grep -m1 '"tag_name"' | sed -E 's/.*"tag_name"[[:space:]]*:[[:space:]]*"v?([^"]+)".*/\1/')"
+  fi
+  [ -n "$version" ] || die "获取版本号失败"
+  log_info "升级到 frp v$version"
+  cmd_backup >/dev/null
+  die "请重新运行 install.sh --version $version 完成升级（保证配置与权限一致）"
+}
+
+cmd_doctor() {
+  local role="client" problems=0
+  if [ -f "$FRP_ENV_FILE" ]; then . "$FRP_ENV_FILE"; role="${FRP_ROLE:-client}"; fi
+  local bin="frpc" conf="$FRP_CONF_DIR/frpc.toml" unit="frpc.service"
+  [ "$role" = "server" ] && { bin="frps"; conf="$FRP_CONF_DIR/frps.toml"; unit="frps.service"; }
+
+  printf '%sfrp-easy doctor%s\n' "$C_BOLD" "$C_RESET"
+
+  if [ -x "$FRP_BIN_DIR/$bin" ]; then
+    log_ok "二进制存在: $FRP_BIN_DIR/$bin ($("$FRP_BIN_DIR/$bin" -v 2>/dev/null))"
+  else
+    log_err "二进制缺失: $FRP_BIN_DIR/$bin"; problems=$((problems+1))
+  fi
+
+  if [ -f "$conf" ]; then
+    log_ok "配置文件存在: $conf"
+    if "$FRP_BIN_DIR/$bin" verify -c "$conf" >/dev/null 2>&1; then
+      log_ok "配置校验通过"
+    else
+      log_warn "配置校验未通过: $("$FRP_BIN_DIR/$bin" verify -c "$conf" 2>&1 | tail -1)"
+      problems=$((problems+1))
+    fi
+  else
+    log_err "配置文件缺失: $conf"; problems=$((problems+1))
+  fi
+
+  if command -v systemctl >/dev/null 2>&1 && [ -z "$FRP_ROOT" ]; then
+    systemctl is-active "$unit" >/dev/null 2>&1 \
+      && log_ok "$unit 运行中" || { log_err "$unit 未运行"; problems=$((problems+1)); }
+  fi
+
+  if [ "$role" = "client" ]; then
+    if admin_alive; then
+      log_ok "管理端可达: 127.0.0.1:${ADMIN_PORT:-7400}"
+    else
+      log_warn "管理端不可达（$API_BODY）"; problems=$((problems+1))
+    fi
+    if [ -f "$FRP_STORE_FILE" ]; then
+      log_ok "动态隧道库: $FRP_STORE_FILE"
+    else
+      log_warn "动态隧道库不存在，动态新增的隧道将无法持久化"
+    fi
+  fi
+
+  local tok="${CLIENT_TOKEN:-${SERVER_TOKEN:-}}"
+  if [ -n "$tok" ] && [ "${#tok}" -lt 16 ]; then
+    log_warn "token 长度偏短（${#tok}），建议 >= 24"; problems=$((problems+1))
+  fi
+
+  if grep -qE 'webServer\.addr[[:space:]]*=[[:space:]]*"0\.0\.0\.0"' "$conf" 2>/dev/null; then
+    log_warn "管理端监听在 0.0.0.0，存在暴露风险，建议改回 127.0.0.1"
+    problems=$((problems+1))
+  fi
+
+  if [ "$problems" -eq 0 ]; then
+    log_ok "自检通过，未发现问题"
+  else
+    log_warn "发现 $problems 个问题，请按上面提示处理"
+  fi
+  return 0
+}
+
+cmd_rescue() {
+  log_step() { printf '%s==>%s %s\n' "$C_GREEN" "$C_RESET" "$*"; }
+  log_step "救援模式"
+  local unit="frpc.service"
+  if command -v systemctl >/dev/null 2>&1 && [ -z "$FRP_ROOT" ]; then
+    systemctl stop "$unit" 2>/dev/null || true
+    log_info "已停止 $unit（停止失败不影响后续操作）"
+  fi
+
+  if [ ! -d "$FRP_BACKUP_DIR" ] || [ -z "$(ls -A "$FRP_BACKUP_DIR" 2>/dev/null)" ]; then
+    die "没有可用备份，无法自动回滚。请手动编辑 $FRP_CONF_DIR/frpc.toml 后执行 systemctl restart frpc"
+  fi
+
+  log_info "可用备份（按时间倒序）："
+  ls -1t "$FRP_BACKUP_DIR" | head -10 | nl
+  local pick name
+  printf '选择要回滚的备份编号: '
+  read -r pick
+  name="$(ls -1t "$FRP_BACKUP_DIR" | head -10 | sed -n "${pick}p")"
+  [ -n "$name" ] || die "无效编号"
+
+  cp -a "$FRP_BACKUP_DIR/$name/frpc.toml" "$FRP_CONF_DIR/frpc.toml" 2>/dev/null || true
+  cp -a "$FRP_BACKUP_DIR/$name/db.json" "$FRP_STORE_FILE" 2>/dev/null || true
+  log_ok "已回滚到 $name"
+
+  if "$FRP_BIN_DIR/frpc" verify -c "$FRP_CONF_DIR/frpc.toml" 2>&1 | tail -3; then
+    log_ok "回滚后的配置校验通过"
+  else
+    log_err "回滚后的配置仍不合法，请人工检查"
+    return 1
+  fi
+  log_hint "确认无误后执行: systemctl restart frpc"
+}
+
+usage() {
+  cat <<EOF
+${C_BOLD}frp-easy${C_RESET} —— frp 运维命令
+
+  frp-easy status                      查看服务与隧道状态
+  frp-easy list                        列出所有隧道
+  frp-easy add <名称> [选项]            动态新增隧道（即时生效，不重启）
+  frp-easy del <名称>                   删除隧道
+  frp-easy expose-admin [本地端口]      生成管理端访问通道
+  frp-easy backup                      备份配置与隧道库
+  frp-easy restore <备份名>             恢复备份
+  frp-easy update [版本]                升级 frp
+  frp-easy doctor                      健康自检
+  frp-easy rescue                      配置失联时的救援回滚
+
+add 选项：
+  --type tcp|udp|http|https|stcp       代理类型（默认 tcp）
+  --local-ip <IP>                      本机服务地址（默认 127.0.0.1）
+  --local-port <端口>                   本机服务端口（必填）
+  --remote-port <端口>                  公网端口（tcp/udp 必填）
+  --domain <域名>                       http/https 用域名；stcp 用此传 secretKey
+
+示例：
+  frp-easy add web --type tcp --local-port 8080 --remote-port 20010
+  frp-easy add blog --type http --local-port 4000 --domain blog.example.com
+EOF
+}
+
+main() {
+  local cmd="${1:-}"
+  [ -n "$cmd" ] || { usage; exit 1; }
+  shift || true
+  case "$cmd" in
+    status)        cmd_status "$@" ;;
+    list|ls)       cmd_list "$@" ;;
+    add)           cmd_add "$@" ;;
+    del|rm)        cmd_del "$@" ;;
+    expose-admin)  cmd_expose_admin "$@" ;;
+    backup)        cmd_backup "$@" ;;
+    restore)       cmd_restore "$@" ;;
+    update)        cmd_update "$@" ;;
+    doctor)        cmd_doctor "$@" ;;
+    rescue)        cmd_rescue "$@" ;;
+    help|-h|--help) usage ;;
+    *) die "未知命令: $cmd（试试 frp-easy help）" ;;
+  esac
+}
+
+main "$@"
