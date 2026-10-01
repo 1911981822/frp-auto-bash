@@ -55,16 +55,97 @@ frp_platform() {
   printf '%s_%s' "$OS_TYPE" "$OS_ARCH"
 }
 
+# 发行版与包管理器探测
+OS_DISTRO="unknown"
+OS_DISTRO_LIKE=""
+PKG_MANAGER=""
+FIREWALL="none"
+NOLOGIN_SHELL=""
+
+detect_distro() {
+  if [ -r /etc/os-release ]; then
+    # shellcheck disable=SC1091
+    . /etc/os-release
+    OS_DISTRO="${ID:-unknown}"
+    OS_DISTRO_LIKE="${ID_LIKE:-}"
+  elif [ -r /etc/alpine-release ]; then
+    OS_DISTRO="alpine"
+  elif command -v lsb_release >/dev/null 2>&1; then
+    OS_DISTRO="$(lsb_release -si 2>/dev/null | tr '[:upper:]' '[:lower:]')"
+  fi
+  [ -n "$OS_DISTRO" ] || OS_DISTRO="unknown"
+}
+
+detect_pkg_manager() {
+  local pm
+  for pm in apt-get dnf yum apk zypper pacman; do
+    if command -v "$pm" >/dev/null 2>&1; then
+      PKG_MANAGER="$pm"
+      return 0
+    fi
+  done
+  PKG_MANAGER=""
+}
+
+# 输出在当前发行版上安装缺失依赖的命令
+pkg_install_cmd() {
+  local pkgs="$*"
+  case "$PKG_MANAGER" in
+    apt-get) printf 'apt-get update && apt-get install -y %s' "$pkgs" ;;
+    dnf|yum) printf '%s install -y %s' "$PKG_MANAGER" "$pkgs" ;;
+    apk)     printf 'apk add %s' "$pkgs" ;;
+    zypper)  printf 'zypper install -y %s' "$pkgs" ;;
+    pacman)  printf 'pacman -S --noconfirm %s' "$pkgs" ;;
+    *)       printf '# 请手动安装: %s' "$pkgs" ;;
+  esac
+}
+
+# 不同发行版的 nologin shell 路径不同
+detect_nologin() {
+  local p
+  for p in /usr/sbin/nologin /sbin/nologin /bin/false; do
+    if [ -x "$p" ]; then
+      NOLOGIN_SHELL="$p"
+      return 0
+    fi
+  done
+  NOLOGIN_SHELL=""
+}
+
+detect_firewall() {
+  if command -v ufw >/dev/null 2>&1; then
+    FIREWALL="ufw"
+  elif command -v firewall-cmd >/dev/null 2>&1; then
+    FIREWALL="firewalld"
+  elif command -v iptables >/dev/null 2>&1; then
+    FIREWALL="iptables"
+  else
+    FIREWALL="none"
+  fi
+}
+
 detect_init() {
   if command -v systemctl >/dev/null 2>&1; then
     HAS_SYSTEMCTL=1
     if systemctl status >/dev/null 2>&1 || [ -d /run/systemd/system ]; then
       INIT_SYSTEM="systemd"
+      return 0
     fi
   fi
-  if [ "$INIT_SYSTEM" = "none" ] && [ -d /run/systemd/system ]; then
+  if [ -d /run/systemd/system ]; then
     INIT_SYSTEM="systemd"
+    return 0
   fi
+  # Alpine / Gentoo 等使用 OpenRC
+  if [ -d /run/openrc ] || command -v rc-service >/dev/null 2>&1 || [ -x /sbin/openrc-run ]; then
+    INIT_SYSTEM="openrc"
+    return 0
+  fi
+  if [ -d /etc/init.d ] && [ -x /etc/init.d/rc ]; then
+    INIT_SYSTEM="sysvinit"
+    return 0
+  fi
+  INIT_SYSTEM="none"
 }
 
 # 检查端口池范围是否合法：validate_range <start> <end>
@@ -80,13 +161,33 @@ detect_all() {
   detect_os
   detect_arch
   detect_arm_hf
+  detect_distro
+  detect_pkg_manager
+  detect_nologin
+  detect_firewall
   detect_init
   [ "$OS_TYPE" = "unknown" ] && die "不支持的操作系统: $(uname -s)"
-  [ "$OS_ARCH" = "unknown" ] && die "不支持的 CPU 架构: $(uname -m)（可用 --arch 手动指定）"
+  [ "$OS_ARCH" = "unknown" ] && die "不支持的 CPU 架构: $(uname -m)"
+  if [ "$INIT_SYSTEM" = "none" ] && [ "$OS_TYPE" = "linux" ]; then
+    log_warn "未识别到 systemd / OpenRC，将只安装程序与生成配置，需你手动启动"
+  fi
   return 0
 }
 
 # 打印探测结果摘要
 detect_summary() {
-  log_info "系统: $OS_TYPE / $(uname -m)  资产平台: $(frp_platform)  初始化: $INIT_SYSTEM"
+  log_info "系统: ${OS_DISTRO} ${OS_TYPE}/$(uname -m)  资产平台: $(frp_platform)"
+  log_info "初始化: ${INIT_SYSTEM}  防火墙: ${FIREWALL}  包管理: ${PKG_MANAGER:-未识别}"
+}
+
+# 检查依赖，缺失时给出当前发行版的安装命令
+require_cmds() {
+  local missing="" c
+  for c in "$@"; do
+    command -v "$c" >/dev/null 2>&1 || missing="$missing $c"
+  done
+  [ -z "$missing" ] && return 0
+  log_err "缺少依赖:${missing}"
+  log_hint "请先安装：  $(pkg_install_cmd curl tar)"
+  die "依赖缺失，已中止"
 }

@@ -44,7 +44,7 @@ die()      { log_err "$*"; exit 1; }
 
 # ---------- 载入安装参数 ----------
 load_conf() {
-  [ -f "$FRP_ENV_FILE" ] || die "未找到 $FRP_ENV_FILE，请先运行 install.sh"
+  [ -f "$FRP_ENV_FILE" ] || die "未找到 ${FRP_ENV_FILE}，请先运行 install.sh"
   # shellcheck disable=SC1090
   . "$FRP_ENV_FILE"
   ADMIN_PORT="${CLIENT_ADMIN_PORT:-7400}"
@@ -97,7 +97,7 @@ build_proxy_json() {
     stcp)
       printf '{"name":"%s","type":"stcp","localIP":"%s","localPort":%s,"stcp":{"secretKey":"%s"}}' \
         "$name" "$lip" "$lp" "$domain" ;;
-    *) die "暂不支持的代理类型: $type（支持 tcp/udp/http/https/stcp）" ;;
+    *) die "暂不支持的代理类型: ${type}（支持 tcp/udp/http/https/stcp）" ;;
   esac
 }
 
@@ -153,7 +153,7 @@ cmd_status() {
   if api GET /api/status; then
     format_status "$API_BODY"
   else
-    log_err "读取失败（HTTP $API_CODE）: $API_BODY"
+    log_err "读取失败（HTTP ${API_CODE}）: $API_BODY"
     log_hint "提示：管理端仅监听 127.0.0.1，需在设备本地执行本命令"
     return 1
   fi
@@ -196,7 +196,7 @@ cmd_add() {
   if api POST /api/store/proxies "$json"; then
     log_ok "隧道 $name 已添加并即时生效（已持久化，重启自动恢复）"
   else
-    log_err "添加失败（HTTP $API_CODE）: $API_BODY"
+    log_err "添加失败（HTTP ${API_CODE}）: $API_BODY"
     return 1
   fi
 }
@@ -209,7 +209,7 @@ cmd_del() {
   if api DELETE "/api/store/proxies/${name}"; then
     log_ok "隧道 $name 已删除并即时生效"
   else
-    log_err "删除失败（HTTP $API_CODE）: $API_BODY"
+    log_err "删除失败（HTTP ${API_CODE}）: $API_BODY"
     return 1
   fi
 }
@@ -320,7 +320,7 @@ cmd_doctor() {
     if admin_alive; then
       log_ok "管理端可达: 127.0.0.1:${ADMIN_PORT:-7400}"
     else
-      log_warn "管理端不可达（$API_BODY）"; problems=$((problems+1))
+      log_warn "管理端不可达（${API_BODY}）"; problems=$((problems+1))
     fi
     if [ -f "$FRP_STORE_FILE" ]; then
       log_ok "动态隧道库: $FRP_STORE_FILE"
@@ -353,7 +353,7 @@ cmd_rescue() {
   local unit="frpc.service"
   if command -v systemctl >/dev/null 2>&1 && [ -z "$FRP_ROOT" ]; then
     systemctl stop "$unit" 2>/dev/null || true
-    log_info "已停止 $unit（停止失败不影响后续操作）"
+    log_info "已停止 ${unit}（停止失败不影响后续操作）"
   fi
 
   if [ ! -d "$FRP_BACKUP_DIR" ] || [ -z "$(ls -A "$FRP_BACKUP_DIR" 2>/dev/null)" ]; then
@@ -381,10 +381,152 @@ cmd_rescue() {
   log_hint "确认无误后执行: systemctl restart frpc"
 }
 
+# ---------- 交互式菜单 ----------
+menu_pause() {
+  printf '\n按回车键继续...'
+  read -r _ || exit 0
+  printf '\n'
+}
+
+draw_menu() {
+  if [ "${FRP_ROLE:-client}" = "server" ]; then
+    cat <<EOF
+
+${C_BOLD}frp-auto-bash${C_RESET} —— 服务端管理菜单
+──────────────────────────────────────────
+  1) 查看服务状态
+  2) 备份配置
+  3) 恢复备份
+  4) 升级 frp
+  5) 健康自检
+  0) 退出
+──────────────────────────────────────────
+EOF
+  else
+    cat <<EOF
+
+${C_BOLD}frp-auto-bash${C_RESET} —— 客户端管理菜单
+──────────────────────────────────────────
+  1) 查看服务与隧道状态
+  2) 新增隧道
+  3) 删除隧道
+  4) 管理端访问方式
+  5) 备份配置
+  6) 恢复备份
+  7) 升级 frp
+  8) 健康自检
+  9) 救援回滚（配置写错导致失联时）
+  0) 退出
+──────────────────────────────────────────
+EOF
+  fi
+}
+
+menu_add() {
+  local name t type lip lp rp domain
+  printf '隧道名称（直接回车取消）: '; read -r name
+  [ -n "$name" ] || { log_warn "已取消"; return 0; }
+  printf '类型  1)tcp  2)udp  3)http  4)https  5)stcp  [1]: '; read -r t
+  case "$t" in
+    2) type="udp" ;; 3) type="http" ;; 4) type="https" ;; 5) type="stcp" ;; *) type="tcp" ;;
+  esac
+  printf '本机服务地址 [127.0.0.1]: '; read -r lip
+  lip="${lip:-127.0.0.1}"
+  printf '本机服务端口: '; read -r lp
+  [ -n "$lp" ] || { log_warn "本机端口不能为空，已取消"; return 0; }
+  case "$type" in
+    tcp|udp) printf '公网端口（须在服务端端口池内）: '; read -r rp ;;
+    http|https) printf '访问域名: '; read -r domain ;;
+    stcp) printf 'secretKey: '; read -r domain ;;
+  esac
+
+  local args=("$name" --type "$type" --local-ip "$lip" --local-port "$lp")
+  [ -n "${rp:-}" ] && args+=(--remote-port "$rp")
+  [ -n "${domain:-}" ] && args+=(--domain "$domain")
+  cmd_add "${args[@]}"
+}
+
+menu_del() {
+  cmd_status || true
+  printf '\n要删除的隧道名称（直接回车取消）: '
+  read -r name
+  [ -n "$name" ] || { log_warn "已取消"; return 0; }
+  cmd_del "$name"
+}
+
+menu_restore() {
+  if [ ! -d "$FRP_BACKUP_DIR" ] || [ -z "$(ls -A "$FRP_BACKUP_DIR" 2>/dev/null)" ]; then
+    log_warn "没有可用备份"; return 0
+  fi
+  ls -1t "$FRP_BACKUP_DIR" | head -10 | nl
+  printf '选择编号（直接回车取消）: '
+  read -r n
+  local name
+  name="$(ls -1t "$FRP_BACKUP_DIR" | head -10 | sed -n "${n}p")"
+  [ -n "$name" ] && cmd_restore "$name" || log_warn "已取消"
+}
+
+# 显示管理端的所有访问方式
+cmd_admin_info() {
+  load_conf
+  log_hint ""
+  log_hint "${C_BOLD}管理端访问方式${C_RESET}"
+  log_hint "─────────────────────────────────────────"
+  if [ -n "${CLIENT_ADMIN_WEB_PORT:-}" ]; then
+    log_hint "  公网直连：http://${CLIENT_SERVER_ADDR}:${CLIENT_ADMIN_WEB_PORT}"
+  else
+    log_hint "  公网直连：未开启（安装时可默认开启，或用 frp-easy add admin-web 手动添加）"
+  fi
+  log_hint "  私有隧道：stcp admin-panel（secretKey 见配置），需先跑 visitor"
+  log_hint "  本机直连：http://127.0.0.1:${ADMIN_PORT}"
+  log_hint ""
+  log_hint "  账号：${CLIENT_ADMIN_USER}   密码：${CLIENT_ADMIN_PASS}"
+  log_hint ""
+  if [ -n "${CLIENT_ADMIN_WEB_PORT:-}" ]; then
+    log_hint "  ${C_YELLOW}安全提示${C_RESET}：公网直连会把管理端暴露到公网。建议用防火墙限制来源 IP，"
+    log_hint "  例如只放行你自己的 IP："
+    log_hint "    ufw allow from <你的IP> to any port ${CLIENT_ADMIN_WEB_PORT}"
+    log_hint "    firewall-cmd --permanent --add-rich-rule='rule family=\"ipv4\" source address=\"<你的IP>\" port protocol=\"tcp\" port=\"${CLIENT_ADMIN_WEB_PORT}\" accept'"
+  fi
+  log_hint ""
+}
+
+cmd_menu() {
+  if [ ! -f "$FRP_ENV_FILE" ]; then
+    die "未找到 ${FRP_ENV_FILE}，请先运行 install.sh 安装 frps 或 frpc"
+  fi
+  # shellcheck disable=SC1090
+  . "$FRP_ENV_FILE"
+  ADMIN_PORT="${CLIENT_ADMIN_PORT:-7400}"
+  ADMIN_USER="${CLIENT_ADMIN_USER:-admin}"
+  ADMIN_PASS="${CLIENT_ADMIN_PASS:-}"
+
+  while true; do
+    draw_menu
+    printf '请输入编号: '
+    read -r c || exit 0
+    case "$c" in
+      1) cmd_status || true ;;
+      2) if [ "${FRP_ROLE:-client}" = "server" ]; then cmd_backup; else menu_add; fi ;;
+      3) if [ "${FRP_ROLE:-client}" = "server" ]; then menu_restore; else menu_del; fi ;;
+      4) if [ "${FRP_ROLE:-client}" = "server" ]; then cmd_update; else cmd_admin_info; fi ;;
+      5) if [ "${FRP_ROLE:-client}" = "server" ]; then cmd_doctor; else cmd_backup; fi ;;
+      6) menu_restore ;;
+      7) cmd_update ;;
+      8) cmd_doctor ;;
+      9) cmd_rescue ;;
+      0) exit 0 ;;
+      *) log_warn "无效编号: $c" ;;
+    esac
+    menu_pause
+  done
+}
+
 usage() {
   cat <<EOF
 ${C_BOLD}frp-easy${C_RESET} —— frp 运维命令
 
+  frp-easy menu                        交互式菜单（安装后可直接输入 frp）
   frp-easy status                      查看服务与隧道状态
   frp-easy list                        列出所有隧道
   frp-easy add <名称> [选项]            动态新增隧道（即时生效，不重启）
@@ -414,6 +556,7 @@ main() {
   [ -n "$cmd" ] || { usage; exit 1; }
   shift || true
   case "$cmd" in
+    menu)          cmd_menu "$@" ;;
     status)        cmd_status "$@" ;;
     list|ls)       cmd_list "$@" ;;
     add)           cmd_add "$@" ;;
@@ -425,7 +568,7 @@ main() {
     doctor)        cmd_doctor "$@" ;;
     rescue)        cmd_rescue "$@" ;;
     help|-h|--help) usage ;;
-    *) die "未知命令: $cmd（试试 frp-easy help）" ;;
+    *) die "未知命令: ${cmd}（试试 frp-easy help）" ;;
   esac
 }
 

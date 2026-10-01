@@ -31,12 +31,14 @@ if [ -n "$FRP_ROOT" ]; then
   FRP_LIB_DIR="$FRP_ROOT/var/lib/frp"
   FRP_LOG_DIR="$FRP_ROOT/var/log/frp"
   FRP_UNIT_DIR="$FRP_ROOT/etc/systemd/system"
+  FRP_INITD_DIR="$FRP_ROOT/etc/init.d"
 else
   FRP_BIN_DIR="/usr/local/bin"
   FRP_CONF_DIR="/etc/frp"
   FRP_LIB_DIR="/var/lib/frp"
   FRP_LOG_DIR="/var/log/frp"
   FRP_UNIT_DIR="/etc/systemd/system"
+  FRP_INITD_DIR="/etc/init.d"
 fi
 
 FRP_STORE_FILE="$FRP_LIB_DIR/db.json"
@@ -172,10 +174,14 @@ RUN_USER="root"
 ensure_user() {
   local u="${1:-frp}"
   id "$u" >/dev/null 2>&1 && return 0
+  local sh="${NOLOGIN_SHELL:-/usr/sbin/nologin}"
   if command -v useradd >/dev/null 2>&1; then
-    useradd -r -s /usr/sbin/nologin -d "$FRP_LIB_DIR" "$u" >/dev/null 2>&1 || return 1
+    useradd -r -s "$sh" -d "$FRP_LIB_DIR" "$u" >/dev/null 2>&1 || return 1
   elif command -v adduser >/dev/null 2>&1; then
-    adduser -S -D -H -h "$FRP_LIB_DIR" "$u" >/dev/null 2>&1 || return 1
+    # Alpine/BusyBox 与 Debian 的 adduser 参数不同，依次尝试
+    adduser -S -D -H -h "$FRP_LIB_DIR" -s "$sh" "$u" >/dev/null 2>&1 \
+      || adduser --system --no-create-home --home "$FRP_LIB_DIR" --shell "$sh" "$u" >/dev/null 2>&1 \
+      || return 1
   else
     return 1
   fi
@@ -226,7 +232,7 @@ trap cleanup EXIT
 
 on_error() {
   local exit_code=$?
-  log_err "执行失败（退出码 $exit_code），第 $1 行：$2"
+  log_err "执行失败（退出码 ${exit_code}），第 $1 行：$2"
   exit "$exit_code"
 }
 set_error_trap() { trap 'on_error $LINENO "$BASH_COMMAND"' ERR; }

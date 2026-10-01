@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# frp —— frp-auto-bash 的交互式菜单入口
+#
+# 客户端（小主机）安装后，直接输入 frp 即可进入数字菜单：
+#
+#   1) 查看服务与隧道状态     2) 新增隧道        3) 删除隧道
+#   4) 管理端访问方式         5) 备份配置        6) 恢复备份
+#   7) 升级 frp               8) 健康自检        9) 救援回滚
+#   0) 退出
+#
+# 也支持透传子命令：frp status / frp add web --type tcp ...
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || printf '/usr/local/bin')"
+FRP_EASY="$SELF_DIR/frp-easy"
+
+if [ ! -x "$FRP_EASY" ]; then
+  echo "[error] 未找到 frp-easy（应在 ${SELF_DIR}），请重新运行 install.sh" >&2
+  exit 1
+fi
+
+# 不带参数 → 菜单；带参数 → 透传给 frp-easy
+if [ $# -eq 0 ]; then
+  exec "$FRP_EASY" menu
+fi
+
+exec "$FRP_EASY" "$@"

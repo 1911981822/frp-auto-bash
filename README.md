@@ -29,6 +29,15 @@ frp-easy status
 frp-easy del web
 ```
 
+**或者在 SSH 连上小主机后直接输入 `frp`，用数字菜单操作：**
+
+```
+  1) 查看服务与隧道状态      2) 新增隧道        3) 删除隧道
+  4) 管理端访问方式          5) 备份配置        6) 恢复备份
+  7) 升级 frp                8) 健康自检        9) 救援回滚
+  0) 退出
+```
+
 ## 命令一览
 
 | 命令 | 作用 |
@@ -36,6 +45,7 @@ frp-easy del web
 | `install.sh server` | 安装 frps（交互式配置端口、token、端口池） |
 | `install.sh client` | 安装 frpc（自动生成 SSH 穿透 + 管理端 + Store） |
 | `install.sh uninstall` | 卸载（保留配置与隧道库） |
+| **`frp`**（客户端） | **交互式菜单，数字选择操作**（等同 `frp-easy menu`） |
 | `frp-easy status` / `list` | 查看服务与隧道状态（表格化） |
 | `frp-easy add <名> [选项]` | 动态新增隧道，即时生效并持久化 |
 | `frp-easy del <名>` | 删除隧道，即时生效 |
@@ -70,9 +80,14 @@ db.json     → 所有业务隧道（浏览器/frp-easy 动态增删改，即时
 
 `frpc reload` 无法修改公共段（serverAddr / auth / transport），所以把"不变的部分"和"常变的部分"分开。改隧道走 Store，连 reload 都不需要。
 
-**2. 管理端不上公网**
+**2. 管理端默认公网直连，可用 stcp 替代**
 
-管理端强制监听 `127.0.0.1`，通过安装时预置的 `stcp` 私有隧道（`admin-panel`）带出。管理端不占用公网端口、不被端口扫描。
+安装客户端时默认把管理端映射到一个公网端口（默认 20100，用 `--admin-web-port` 改，`--no-admin-web` 关闭），
+浏览器直接打开 `http://<公网IP>:<端口>` 即可。管理端本身仍强制监听 `127.0.0.1`，暴露出去的只是这条隧道。
+
+> ⚠️ 公网直连意味着任何人都看得到登录页。请务必用防火墙把该端口限制为仅你的 IP 可访问（见下）。
+
+不想暴露时，用 `--no-admin-web` 改为 stcp 私有通道（`admin-panel`），
 访问时在你自己的电脑上跑一个 visitor：
 
 ```bash
@@ -102,11 +117,35 @@ frpc -c /var/lib/frp/admin-visitor.toml
 ## 安全基线
 
 - token 随机生成（32 位），长度不足 16 时 `doctor` 会告警
-- 管理端 BasicAuth 随机强口令，强制 `127.0.0.1` 监听；`doctor` 检测到 `0.0.0.0` 会告警
+- 管理端 BasicAuth 随机强口令，管理端本身强制 `127.0.0.1` 监听；`doctor` 检测到 `0.0.0.0` 会告警
+- **公网直连的管理端端口务必限制来源 IP**（默认 20100）：
+
+  ```bash
+  # Debian/Ubuntu
+  ufw allow from <你的IP> to any port 20100
+  # RHEL 系
+  firewall-cmd --permanent --add-rich-rule='rule family="ipv4" source address="<你的IP>" port protocol="tcp" port="20100" accept' && firewall-cmd --reload
+  ```
+
+  云服务器安全组同样要只放行你的 IP。
 - 服务端 `allowPorts` 收敛端口池，防止客户端乱占端口
 - 以非 root 用户 `frp` 运行，systemd 启用 `ProtectSystem=strict` + `ReadWritePaths`
 - 下载时强制 SHA256 校验，不匹配立即中止
 - 建议小主机 SSH 关闭密码登录、仅用密钥
+
+## 支持的系统
+
+| 发行版 | 初始化 | 状态 |
+|--------|--------|------|
+| Debian / Ubuntu | systemd | 支持 |
+| RHEL / CentOS / Rocky / Alma / Fedora | systemd | 支持 |
+| openSUSE | systemd | 支持 |
+| Arch Linux | systemd | 支持 |
+| Alpine Linux | OpenRC | 支持（生成 `/etc/init.d/frpc` 并 `rc-update add`） |
+| Gentoo | OpenRC | 支持 |
+
+安装时会自动探测发行版、包管理器、初始化系统与防火墙，并给出对应发行版的放行命令。
+未识别到 systemd / OpenRC 时只安装程序与配置，需手动启动。
 
 ## 已知坑（重要）
 

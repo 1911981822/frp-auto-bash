@@ -41,3 +41,4 @@ type = "tcp"
 localIP = "127.0.0.1"
 localPort = {{SSH_LOCAL_PORT}}
 remotePort = {{SSH_REMOTE_PORT}}
+{{ADMIN_WEB_BLOCK}}

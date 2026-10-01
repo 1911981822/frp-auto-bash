@@ -12,6 +12,8 @@ CLIENT_ADMIN_PASS="${CLIENT_ADMIN_PASS:-}"
 CLIENT_ADMIN_SECRET="${CLIENT_ADMIN_SECRET:-}"
 CLIENT_SSH_LOCAL_PORT="${CLIENT_SSH_LOCAL_PORT:-}"
 CLIENT_SSH_REMOTE_PORT="${CLIENT_SSH_REMOTE_PORT:-}"
+CLIENT_ADMIN_WEB_PORT="${CLIENT_ADMIN_WEB_PORT:-}"
+CLIENT_ADMIN_WEB_ENABLE="${CLIENT_ADMIN_WEB_ENABLE:-1}"
 
 client_prompt_params() {
   log_step "配置 frpc 客户端参数"
@@ -62,6 +64,25 @@ client_prompt_params() {
   if ! port_in_use "$CLIENT_SSH_LOCAL_PORT" && [ -z "$FRP_ROOT" ]; then
     log_warn "本机 ${CLIENT_SSH_LOCAL_PORT} 端口似乎没有服务监听，请确认 SSH 端口是否正确"
   fi
+
+  # 管理端公网直连（默认开启）
+  if [ "$CLIENT_ADMIN_WEB_ENABLE" = "1" ]; then
+    [ -n "$CLIENT_ADMIN_WEB_PORT" ] || CLIENT_ADMIN_WEB_PORT=20100
+    if [ -z "$NON_INTERACTIVE" ]; then
+      if confirm "是否把管理端映射到公网端口（浏览器直接访问，默认端口 ${CLIENT_ADMIN_WEB_PORT}）？" "y"; then
+        ask "公网访问管理端的端口" "$CLIENT_ADMIN_WEB_PORT" CLIENT_ADMIN_WEB_PORT
+      else
+        CLIENT_ADMIN_WEB_ENABLE=0
+        CLIENT_ADMIN_WEB_PORT=""
+        log_info "已跳过公网映射，之后可用 frp-easy add admin-web 手动添加"
+      fi
+    fi
+    if [ -n "$CLIENT_ADMIN_WEB_PORT" ]; then
+      valid_port "$CLIENT_ADMIN_WEB_PORT" || die "管理端公网端口非法: $CLIENT_ADMIN_WEB_PORT"
+    fi
+  else
+    CLIENT_ADMIN_WEB_PORT=""
+  fi
 }
 
 install_client() {
@@ -80,7 +101,24 @@ install_client() {
 
   local conf="$FRP_CONF_DIR/frpc.toml"
   backup_file "$conf"
+
+  # 公网直连管理端的代理段（关闭时为空）
+  local admin_web_block=""
+  if [ "$CLIENT_ADMIN_WEB_ENABLE" = "1" ] && [ -n "$CLIENT_ADMIN_WEB_PORT" ]; then
+    admin_web_block='
+# 公网直连管理端：http://'"${CLIENT_SERVER_ADDR}"':'"${CLIENT_ADMIN_WEB_PORT}"'
+# 安全建议：用防火墙把该端口限制为仅你的 IP 可访问
+[[proxies]]
+name = "admin-web"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = '"${CLIENT_ADMIN_PORT}"'
+remotePort = '"${CLIENT_ADMIN_WEB_PORT}"'
+'
+  fi
+
   render_template "$tpl_dir/frpc.toml.tpl" "$conf" \
+    "ADMIN_WEB_BLOCK=$admin_web_block" \
     "GENERATED_AT=$(date '+%Y-%m-%d %H:%M:%S')" \
     "SERVER_ADDR=$CLIENT_SERVER_ADDR" \
     "SERVER_PORT=$CLIENT_SERVER_PORT" \
@@ -104,7 +142,7 @@ install_client() {
   # 空 store 文件，保证权限正确
   [ -f "$FRP_STORE_FILE" ] || write_file "$FRP_STORE_FILE" '{ "proxies": [], "visitors": [] }'
 
-  install_unit client "$tpl_dir"
+  install_service client "$tpl_dir"
   service_reload_daemon
   service_enable_start frpc.service
 
@@ -120,7 +158,8 @@ install_client() {
     "CLIENT_ADMIN_PASS=$CLIENT_ADMIN_PASS" \
     "CLIENT_ADMIN_SECRET=$CLIENT_ADMIN_SECRET" \
     "CLIENT_SSH_LOCAL_PORT=$CLIENT_SSH_LOCAL_PORT" \
-    "CLIENT_SSH_REMOTE_PORT=$CLIENT_SSH_REMOTE_PORT"
+    "CLIENT_SSH_REMOTE_PORT=$CLIENT_SSH_REMOTE_PORT" \
+    "CLIENT_ADMIN_WEB_PORT=$CLIENT_ADMIN_WEB_PORT"
 
   print_client_summary
 }
@@ -130,10 +169,23 @@ print_client_summary() {
   log_hint "${C_BOLD}frpc 安装完成${C_RESET}"
   log_hint "---------------------------------------------"
   log_hint "  SSH 访问    : ssh -p ${CLIENT_SSH_REMOTE_PORT} <用户名>@${CLIENT_SERVER_ADDR}"
-  log_hint "  管理端      : http://127.0.0.1:${CLIENT_ADMIN_PORT}  (${CLIENT_ADMIN_USER} / ${CLIENT_ADMIN_PASS})"
+  if [ -n "${CLIENT_ADMIN_WEB_PORT:-}" ]; then
+    log_hint "  管理端(公网): http://${CLIENT_SERVER_ADDR}:${CLIENT_ADMIN_WEB_PORT}"
+  else
+    log_hint "  管理端(公网): 未开启"
+  fi
+  log_hint "  管理端(本机): http://127.0.0.1:${CLIENT_ADMIN_PORT}"
+  log_hint "  账号密码    : ${CLIENT_ADMIN_USER} / ${CLIENT_ADMIN_PASS}"
   log_hint "  动态隧道库  : ${FRP_STORE_FILE}"
   log_hint ""
-  log_hint "${C_BOLD}从你的电脑访问管理端${C_RESET}（stcp 私有隧道，管理端本身不暴露公网）："
+  if [ -n "${CLIENT_ADMIN_WEB_PORT:-}" ]; then
+    log_hint "  ${C_YELLOW}注意${C_RESET}：管理端已暴露到公网 ${CLIENT_ADMIN_WEB_PORT} 端口，任何人都能访问登录页。"
+    log_hint "  建议用防火墙只放行你自己的 IP，例如："
+    log_hint "    ufw allow from <你的IP> to any port ${CLIENT_ADMIN_WEB_PORT}"
+    log_hint "  云服务器安全组同样需要放行该端口。"
+    log_hint ""
+  fi
+  log_hint "${C_BOLD}备选访问方式${C_RESET}：stcp 私有隧道（不占公网端口，适合公网端口被封锁或不想暴露时）"
   log_hint "  新建 visitor.toml："
   log_hint ""
   log_hint "    serverAddr = \"${CLIENT_SERVER_ADDR}\""

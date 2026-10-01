@@ -74,6 +74,8 @@ ${C_BOLD}frp-auto-bash${C_RESET} v${FRP_EASY_VERSION} —— frp 一键部署外
   --user <name>              本机标识（默认主机名）
   --ssh-local-port <port>    本机 SSH 端口（默认 22）
   --ssh-remote-port <port>   公网访问 SSH 的端口（需在端口池内）
+  --admin-web-port <port>    公网访问管理端的端口（默认 20100，需在端口池内）
+  --no-admin-web             不把管理端映射到公网（改用 stcp 私有通道）
 
 通用选项:
   --version <x.y.z>          指定 frp 版本（默认 ${DEFAULT_FRP_VERSION}）
@@ -114,6 +116,8 @@ parse_args() {
       --admin-port)           CLIENT_ADMIN_PORT="${2:?}"; shift 2 ;;
       --ssh-local-port)       CLIENT_SSH_LOCAL_PORT="${2:?}"; shift 2 ;;
       --ssh-remote-port)      CLIENT_SSH_REMOTE_PORT="${2:?}"; shift 2 ;;
+      --admin-web-port)       CLIENT_ADMIN_WEB_PORT="${2:?}"; shift 2 ;;
+      --no-admin-web)         CLIENT_ADMIN_WEB_ENABLE=0; shift ;;
       --no-service)           SKIP_SERVICE=1; shift ;;
       -y|--yes)               NON_INTERACTIVE=1; shift ;;
       *)  die "未知参数: $1（试试 install.sh help）" ;;
@@ -136,7 +140,7 @@ do_uninstall() {
     rm -f "$FRP_BIN_DIR/$u"
   done
   [ -z "$FRP_ROOT" ] && service_reload_daemon
-  log_warn "配置与隧道库保留在 $FRP_CONF_DIR 与 $FRP_LIB_DIR，确认无用后可手动删除"
+  log_warn "配置与隧道库保留在 $FRP_CONF_DIR 与 ${FRP_LIB_DIR}，确认无用后可手动删除"
   log_ok "卸载完成"
 }
 
@@ -165,6 +169,11 @@ main() {
     install -m 0755 "$REPO_DIR/bin/frp-easy" "$FRP_BIN_DIR/frp-easy"
     log_ok "已安装运维命令 $FRP_BIN_DIR/frp-easy"
   fi
+  if [ -f "$REPO_DIR/bin/frp" ]; then
+    mkdir -p "$FRP_BIN_DIR"
+    install -m 0755 "$REPO_DIR/bin/frp" "$FRP_BIN_DIR/frp"
+    log_ok "已安装菜单命令 $FRP_BIN_DIR/frp（安装后直接输入 frp 打开菜单）"
+  fi
 
   case "$ROLE" in
     server) install_server "$FRP_VERSION" "$TPL_DIR" ;;
@@ -172,7 +181,10 @@ main() {
   esac
 
   log_hint ""
-  log_hint "运维命令：frp-easy status | add | del | expose-admin | backup | doctor | rescue"
+  if [ "$ROLE" = "client" ]; then
+    log_hint "之后直接输入 ${C_BOLD}frp${C_RESET} 打开管理菜单（数字选择操作）"
+  fi
+  log_hint "命令行：frp-easy status | add | del | expose-admin | backup | doctor | rescue"
 }
 
 main "$@"

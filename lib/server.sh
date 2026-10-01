@@ -77,9 +77,10 @@ install_server() {
   fi
 
   # 服务
-  install_unit server "$tpl_dir"
+  install_service server "$tpl_dir"
   service_reload_daemon
   service_enable_start frps.service
+  firewall_hint "$SERVER_BIND_PORT $SERVER_SSH_GATEWAY_PORT"
 
   # 持久化参数
   save_env \
