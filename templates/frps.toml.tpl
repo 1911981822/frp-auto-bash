@@ -19,9 +19,8 @@ webServer.password = "{{DASH_PASS}}"
 # 应急 SSH 隧道网关：即使 frpc 配置写错，也能用 ssh -R 临时建隧道救回
 sshTunnelGateway.bindPort = {{SSH_GATEWAY_PORT}}
 
-# 如需让 Web 管理端走域名访问，取消下面两行注释并配合客户端 http 类型代理
-# vhostHTTPPort = 80
-# vhostHTTPSPort = 443
+# 可选能力（vhost 端口 / 子域名 / Prometheus / 每客户端端口上限）
+{{ADVANCED_BLOCK}}
 
 log.level = "info"
 log.maxDays = 7

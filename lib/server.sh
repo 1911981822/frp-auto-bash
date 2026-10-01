@@ -9,6 +9,11 @@ SERVER_PORT_END="${SERVER_PORT_END:-}"
 SERVER_DASH_PORT="${SERVER_DASH_PORT:-}"
 SERVER_SSH_GATEWAY_PORT="${SERVER_SSH_GATEWAY_PORT:-}"
 SERVER_TOKEN="${SERVER_TOKEN:-}"
+SERVER_VHOST_HTTP_PORT="${SERVER_VHOST_HTTP_PORT:-}"
+SERVER_VHOST_HTTPS_PORT="${SERVER_VHOST_HTTPS_PORT:-}"
+SERVER_SUBDOMAIN_HOST="${SERVER_SUBDOMAIN_HOST:-}"
+SERVER_MAX_PORTS_PER_CLIENT="${SERVER_MAX_PORTS_PER_CLIENT:-}"
+SERVER_PROMETHEUS="${SERVER_PROMETHEUS:-0}"
 
 server_prompt_params() {
   log_step "配置 frps 服务端参数"
@@ -59,7 +64,33 @@ install_server() {
   local dash_pass
   dash_pass="$(rand_str 20)"
   SERVER_DASH_PASS="$dash_pass"
+
+  # 可选能力：按需拼装，未启用时不写入（避免占用 80/443 等端口）
+  local adv=""
+  if [ -n "$SERVER_VHOST_HTTP_PORT" ] && [ "$SERVER_VHOST_HTTP_PORT" != "0" ]; then
+    adv="${adv}
+# http 类型隧道需要；客户端用 frp-easy add <名> --type http --domain <域名> 添加
+vhostHTTPPort = ${SERVER_VHOST_HTTP_PORT}"
+  fi
+  if [ -n "$SERVER_VHOST_HTTPS_PORT" ] && [ "$SERVER_VHOST_HTTPS_PORT" != "0" ]; then
+    adv="${adv}
+vhostHTTPSPort = ${SERVER_VHOST_HTTPS_PORT}"
+  fi
+  if [ -n "$SERVER_SUBDOMAIN_HOST" ]; then
+    adv="${adv}
+subdomainHost = \"${SERVER_SUBDOMAIN_HOST}\""
+  fi
+  if [ "$SERVER_PROMETHEUS" = "1" ]; then
+    adv="${adv}
+# 开启后 dashboard 提供 /metrics
+enablePrometheus = true"
+  fi
+  if [ -n "$SERVER_MAX_PORTS_PER_CLIENT" ] && [ "$SERVER_MAX_PORTS_PER_CLIENT" != "0" ]; then
+    adv="${adv}
+maxPortsPerClient = ${SERVER_MAX_PORTS_PER_CLIENT}"
+  fi
   render_template "$tpl_dir/frps.toml.tpl" "$conf" \
+    "ADVANCED_BLOCK=$adv" \
     "GENERATED_AT=$(date '+%Y-%m-%d %H:%M:%S')" \
     "BIND_PORT=$SERVER_BIND_PORT" \
     "TOKEN=$SERVER_TOKEN" \
@@ -91,7 +122,12 @@ install_server() {
     "SERVER_PORT_START=$SERVER_PORT_START" \
     "SERVER_PORT_END=$SERVER_PORT_END" \
     "SERVER_DASH_PORT=$SERVER_DASH_PORT" \
-    "SERVER_DASH_PASS=$dash_pass"
+    "SERVER_DASH_PASS=$dash_pass" \
+    "SERVER_VHOST_HTTP_PORT=$SERVER_VHOST_HTTP_PORT" \
+    "SERVER_VHOST_HTTPS_PORT=$SERVER_VHOST_HTTPS_PORT" \
+    "SERVER_SUBDOMAIN_HOST=$SERVER_SUBDOMAIN_HOST" \
+    "SERVER_MAX_PORTS_PER_CLIENT=$SERVER_MAX_PORTS_PER_CLIENT" \
+    "SERVER_PROMETHEUS=$SERVER_PROMETHEUS"
 
   print_server_summary
 }

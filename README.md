@@ -55,6 +55,19 @@ frp-easy del web
 | `frp-easy doctor` | 健康自检 |
 | `frp-easy rescue` | 配置写错导致失联时的一键回滚 |
 
+### 服务端可选能力（默认关闭，按需开启）
+
+```bash
+sudo ./install.sh server --vhost-http-port 8080       # 启用 http 类型隧道
+sudo ./install.sh server --vhost-https-port 8443      # 启用 https 类型隧道
+sudo ./install.sh server --subdomain frp.example.com  # 子域名后缀
+sudo ./install.sh server --prometheus                 # 开启 /metrics 监控端点
+sudo ./install.sh server --max-ports-per-client 20    # 限制单个客户端可占端口数
+```
+
+服务端装完后输入 `frp` 也会出菜单（6 项：状态 / 备份 / 恢复 / 升级 / 自检 / 退出），
+其中"服务状态"会读 frps 的 dashboard API，显示版本、连接数、客户端数、各类型隧道数量。
+
 ### `add` 选项
 
 | 选项 | 说明 |

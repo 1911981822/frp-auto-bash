@@ -66,6 +66,11 @@ ${C_BOLD}frp-auto-bash${C_RESET} v${FRP_EASY_VERSION} —— frp 一键部署外
   --bind-port <port>        frps 监听端口（默认 7000）
   --port-range <start-end>  穿透端口池（默认 20000-20100）
   --token <token>           认证 token（默认随机生成）
+  --vhost-http-port <port>  开启 http 类型隧道（默认关闭）
+  --vhost-https-port <port> 开启 https 类型隧道（默认关闭）
+  --subdomain <域名>        子域名后缀，配合 http 隧道使用
+  --max-ports-per-client <n> 限制单个客户端可占用的端口数
+  --prometheus              开启 /metrics 监控端点
 
 客户端选项:
   --server-addr <ip/域名>    frps 地址（必填）
@@ -110,6 +115,11 @@ parse_args() {
         SERVER_PORT_END="${2##*-}"
         shift 2 ;;
       --token)                SERVER_TOKEN="$2"; CLIENT_TOKEN="$2"; shift 2 ;;
+      --vhost-http-port)      SERVER_VHOST_HTTP_PORT="${2:?}"; shift 2 ;;
+      --vhost-https-port)     SERVER_VHOST_HTTPS_PORT="${2:?}"; shift 2 ;;
+      --subdomain)            SERVER_SUBDOMAIN_HOST="${2:?}"; shift 2 ;;
+      --max-ports-per-client) SERVER_MAX_PORTS_PER_CLIENT="${2:?}"; shift 2 ;;
+      --prometheus)           SERVER_PROMETHEUS=1; shift ;;
       --server-addr)          CLIENT_SERVER_ADDR="${2:?}"; shift 2 ;;
       --server-port)          CLIENT_SERVER_PORT="${2:?}"; shift 2 ;;
       --user)                 CLIENT_USER="${2:?}"; shift 2 ;;

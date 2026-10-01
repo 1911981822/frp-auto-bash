@@ -114,6 +114,11 @@ json_field() {
   printf '%s' "$1" | sed -n "s/.*\"$2\":\"\([^\"]*\)\".*/\1/p"
 }
 
+# 通用取值：兼容字符串与数字，去掉引号
+json_val() {
+  printf '%s' "$1" | sed -n "s/.*\"$2\":\([^,}]*\).*/\1/p" | tr -d '"'
+}
+
 format_status() {
   local json="$1"
   if command -v python3 >/dev/null 2>&1; then
@@ -142,7 +147,69 @@ for kind in d:
 }
 
 # ---------- 子命令 ----------
+# 服务端状态：读 frps 的 dashboard API（仅本地 127.0.0.1）
+cmd_status_server() {
+  local dash_port="${SERVER_DASH_PORT:-7500}"
+  local dash_pass="${SERVER_DASH_PASS:-}"
+
+  printf '%s服务状态%s\n' "$C_BOLD" "$C_RESET"
+  if command -v systemctl >/dev/null 2>&1 && [ -z "$FRP_ROOT" ]; then
+    systemctl is-active frps.service >/dev/null 2>&1 \
+      && log_ok "frps.service 运行中" || log_warn "frps.service 未运行"
+  fi
+
+  if [ -z "$dash_pass" ]; then
+    log_warn "未记录 dashboard 密码，跳过在线状态查询"
+    return 0
+  fi
+  if ! command -v curl >/dev/null 2>&1; then
+    log_warn "需要 curl 才能查询服务端状态"
+    return 0
+  fi
+
+  local out code body
+  out="$(curl -s --noproxy '*' -u "admin:${dash_pass}" -w '\n%{http_code}' \
+        "http://127.0.0.1:${dash_port}/api/serverinfo" 2>/dev/null)"
+  code="$(printf '%s' "$out" | tail -n1)"
+  body="$(printf '%s' "$out" | sed '$d')"
+
+  printf '\n%s服务端概览%s\n' "$C_BOLD" "$C_RESET"
+  if [ "$code" != "200" ]; then
+    log_err "读取 dashboard 失败（HTTP ${code}）"
+    log_hint "  确认 frps 正在运行，且 webServer 端口为 ${dash_port}"
+    return 1
+  fi
+
+  printf '  %-10s %s\n' "版本"      "$(json_val "$body" version)"
+  printf '  %-10s %s\n' "监听端口"  "$(json_val "$body" bindPort)"
+  printf '  %-10s %s\n' "端口池"    "$(json_val "$body" allowPortsStr)"
+  printf '  %-10s %s\n' "当前连接"  "$(json_val "$body" curConns)"
+  printf '  %-10s %s\n' "客户端数"  "$(json_val "$body" clientCounts)"
+  printf '  %-10s %s\n' "HTTP端口"  "$(json_val "$body" vhostHTTPPort)"
+  printf '  %-10s %s\n' "HTTPS端口" "$(json_val "$body" vhostHTTPSPort)"
+  printf '  %-10s %s\n' "子域名"    "$(json_val "$body" subdomainHost)"
+
+  printf '\n%s各类型隧道%s\n' "$C_BOLD" "$C_RESET"
+  local t o n total=0
+  for t in tcp udp http https stcp sudp xtcp tcpmux; do
+    o="$(curl -s --noproxy '*' -u "admin:${dash_pass}" \
+         "http://127.0.0.1:${dash_port}/api/proxy/${t}" 2>/dev/null)"
+    n="$(printf '%s' "$o" | grep -o '"name"' | wc -l | tr -d ' ')"
+    if [ "${n:-0}" -gt 0 ]; then
+      printf '  %-10s %s 条\n' "$t" "$n"
+      total=$((total + n))
+    fi
+  done
+  [ "$total" -eq 0 ] && printf '  （暂无隧道）\n'
+  return 0
+}
+
 cmd_status() {
+  [ -f "$FRP_ENV_FILE" ] && . "$FRP_ENV_FILE"
+  if [ "${FRP_ROLE:-client}" = "server" ]; then
+    cmd_status_server
+    return $?
+  fi
   load_conf
   printf '%s服务状态%s\n' "$C_BOLD" "$C_RESET"
   if command -v systemctl >/dev/null 2>&1 && [ -z "$FRP_ROOT" ]; then
@@ -349,15 +416,21 @@ cmd_doctor() {
 
 cmd_rescue() {
   log_step() { printf '%s==>%s %s\n' "$C_GREEN" "$C_RESET" "$*"; }
-  log_step "救援模式"
-  local unit="frpc.service"
+  # 按角色决定回滚哪个配置（服务端与客户端的文件不同）
+  [ -f "$FRP_ENV_FILE" ] && . "$FRP_ENV_FILE"
+  local bin="frpc" conf="frpc.toml" unit="frpc.service"
+  if [ "${FRP_ROLE:-client}" = "server" ]; then
+    bin="frps"; conf="frps.toml"; unit="frps.service"
+  fi
+
+  log_step "救援模式（${bin}）"
   if command -v systemctl >/dev/null 2>&1 && [ -z "$FRP_ROOT" ]; then
     systemctl stop "$unit" 2>/dev/null || true
     log_info "已停止 ${unit}（停止失败不影响后续操作）"
   fi
 
   if [ ! -d "$FRP_BACKUP_DIR" ] || [ -z "$(ls -A "$FRP_BACKUP_DIR" 2>/dev/null)" ]; then
-    die "没有可用备份，无法自动回滚。请手动编辑 $FRP_CONF_DIR/frpc.toml 后执行 systemctl restart frpc"
+    die "没有可用备份，无法自动回滚。请手动编辑 $FRP_CONF_DIR/${conf} 后执行 systemctl restart ${bin}"
   fi
 
   log_info "可用备份（按时间倒序）："
@@ -368,17 +441,17 @@ cmd_rescue() {
   name="$(ls -1t "$FRP_BACKUP_DIR" | head -10 | sed -n "${pick}p")"
   [ -n "$name" ] || die "无效编号"
 
-  cp -a "$FRP_BACKUP_DIR/$name/frpc.toml" "$FRP_CONF_DIR/frpc.toml" 2>/dev/null || true
+  cp -a "$FRP_BACKUP_DIR/$name/${conf}" "$FRP_CONF_DIR/${conf}" 2>/dev/null || true
   cp -a "$FRP_BACKUP_DIR/$name/db.json" "$FRP_STORE_FILE" 2>/dev/null || true
   log_ok "已回滚到 $name"
 
-  if "$FRP_BIN_DIR/frpc" verify -c "$FRP_CONF_DIR/frpc.toml" 2>&1 | tail -3; then
+  if "$FRP_BIN_DIR/${bin}" verify -c "$FRP_CONF_DIR/${conf}" 2>&1 | tail -3; then
     log_ok "回滚后的配置校验通过"
   else
     log_err "回滚后的配置仍不合法，请人工检查"
     return 1
   fi
-  log_hint "确认无误后执行: systemctl restart frpc"
+  log_hint "确认无误后执行: systemctl restart ${bin}"
 }
 
 # ---------- 交互式菜单 ----------
